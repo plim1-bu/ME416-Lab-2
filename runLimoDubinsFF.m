@@ -1,17 +1,16 @@
 function runLimoDubinsFF()
 % RUNLIMODUBINSFF - Feedforward control for Limo using TCP
-% Uses dubinsConnection with robust interpolation and error handling.
 
 %% ---------------- 1. Configuration Constants ----------------
-CONST.V_MAX = 0.3;                  % Max linear velocity [m/s]
-CONST.DT = 0.55;                    % Feedforward interval [s] as suggested by lab manual
-CONST.R_MIN = 0.6;                  % Minimum turning radius [m]. INCREASED to 0.6m to force a gentler curve, reducing slip/positional 
-CONST.K_VELOCITY = 0.96;            % Linear Velocity Gain (K_V). CALIBRATED: Adjusted post overshoots in testing
-CONST.K_OMEGA = 1.6;                % Angular Velocity Gain (K_omega). CALIBRATED: Adjusted post overshoots in testing
-CONST.FIXED_IP = '192.168.1.';      % First 3 octets of Limo IP
-CONST.LIMO_PORT = 12345;
-CONST.FINAL_ROTATION_STEPS = 15;    % Buffer steps at end of runtime for final rotation
-CONST.INTERPOLATION_POINTS = 1000;  % High number for robust path length estimation
+CONST.V_MAX                = 0.3;               % Max linear velocity [m/s]
+CONST.DT                   = 0.05;              % Feedforward interval [s] as suggested by lab manual
+CONST.R_MIN                = 0.6;               % Minimum turning radius [m]. INCREASED to 0.6m to force a gentler curve, reducing slip/positional 
+CONST.K_VELOCITY           = 0.96;              % Linear Velocity Gain (K_V). CALIBRATED: Adjusted post overshoots in testing
+CONST.K_OMEGA              = 1.6;               % Angular Velocity Gain (K_omega). CALIBRATED: Adjusted post overshoots in testing
+CONST.FIXED_IP             = '192.168.1.';      % First 3 octets of Limo IP
+CONST.LIMO_PORT            = 12345;
+CONST.FINAL_ROTATION_STEPS = 15;                % Buffer steps at end of runtime for final rotation
+CONST.INTERPOLATION_POINTS = 1000;              % High number for robust path length estimation
 
 % Initialize TCP client handle
 tcpClient = []; 
@@ -35,7 +34,7 @@ try
     % Convert degrees to radians and normalize goal angle
     theta0 = deg2rad(theta0_deg);
     thetaf_rad = deg2rad(thetaf_deg);
-    thetaf = wrapToPi(thetaf_rad); % Robust normalization
+    thetaf = wrapToPi(thetaf_rad);     % Robust normalization
     
     fprintf('Goal theta normalized from %.4f rad to %.4f rad for planning.\n', thetaf_rad, thetaf);
     
@@ -69,7 +68,8 @@ try
     %% ---------------- 5. Feedforward Loop ----------------
     % Iterates through each time step
     for k = 1:num_steps - 1
-       % Current time of execution
+    
+        % Current time of execution
         t = k * CONST.DT;
         
         % Current desired pose
@@ -85,7 +85,7 @@ try
         sendFeedforwardCommand(tcpClient, x_d, y_d, theta_d, x_next, y_next, theta_next, CONST, t);
 
         % Wait for specified time step
-        pause(CONST.DT);
+        pause(CONST.DT); % Wait CONST.DT seconds before sending next command
     end
 
 catch ME
@@ -94,14 +94,15 @@ catch ME
      
     %% ---------------- 6. Cleanup and Stop Command ----------------
     if ~isempty(tcpClient) && isvalid(tcpClient)
+    
         % Send final stop command (k=num_steps)
         cmd = sprintf('0.00,0.00');
         write(tcpClient, uint8(cmd));
         
-        % PAUSE added to give Limo time to zero its steering angle
+        % Extra pause added to give Limo time to zero its steering angle
         pause(1.0); 
         
-        clear tcpClient; % Closes the connection
+        clear tcpClient;    % Closes the connection
         disp('Feedforward path complete. TCP connection closed.');
     else
         disp('No active TCP connection was established or needed closing.');
@@ -109,7 +110,7 @@ catch ME
 end
 
 disp('Script execution finished.');
-end % end of runLimoDubinsFF
+end 
 
 %% ---------------- Local Functions ----------------
 function [path_points, num_steps] = dubinsPathPlanning(startPose, goalPose, CONST)
@@ -186,9 +187,9 @@ function sendFeedforwardCommand(tcpClient, x_d, y_d, theta_d, x_next, y_next, th
     % SENDFEEDFORWARDCOMMAND Computes and sends one feedforward command.
     
     % Compute linear velocity (finite difference for position)
-    dx = (x_next - x_d);                 % Change in x
-    dy = (y_next - y_d);                 % Change in y
-    v_d = sqrt(dx^2 + dy^2) / CONST.DT;  % Total displacement calculation
+    dx = (x_next - x_d);                       % Change in x
+    dy = (y_next - y_d);                       % Change in y
+    v_d = sqrt(dx^2 + dy^2) / CONST.DT;        % Total displacement calculation
     
     % Compute angular velocity (finite difference for orientation)
     dtheta = angdiff(theta_d, theta_next);     % Change in angle
@@ -211,3 +212,4 @@ function sendFeedforwardCommand(tcpClient, x_d, y_d, theta_d, x_next, y_next, th
     fprintf('t=%.2f s | v=%.2f, omega_raw=%.2f, omega_sent=%.2f\n', ...
         t, v_d, omega_raw, omega_sent);
 end
+
