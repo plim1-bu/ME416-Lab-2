@@ -1,9 +1,15 @@
 clearvars;
 %%
+% Get LIMO number from user
+limoNum = input('Enter LIMO number (e.g., 777, 780): ', 's');  % User inputs LIMO number
 mqttClient = mqttclient("mqtt://rasticvm.lan"); %connect to mqtt broker
+
+% Define MoCap origin for coordinate transformation
+MOCAP_ORIGIN_X = -4.5;  % MoCap X coordinate for map origin (0,0)
+MOCAP_ORIGIN_Y = 2.7;   % MoCap Y coordinate for map origin (0,0)
 %%
-SubscrTable = subscribe(mqttClient,"rb/limo780/rot");
-SubscrTable = subscribe(mqttClient,"rb/limo780/pos");
+SubscrTable = subscribe(mqttClient,sprintf("rb/limo%s/rot", limoNum));
+SubscrTable = subscribe(mqttClient,sprintf("rb/limo%s/pos", limoNum));
 %SubscrTable = subscribe(mqttClient, mqttTopic, Name=values);
 %%
 % ===== CONTINUOUS MOTION CAPTURE TRACKING (2D TOP-DOWN VIEW) =====
@@ -103,7 +109,7 @@ while true
     
     % ===== READ POSITION DATA FROM MQTT =====
     % Read the latest position message from the MQTT topic
-    posTable = read(mqttClient, Topic="rb/limo780/pos");  % Returns table with Data field
+    posTable = read(mqttClient, Topic=sprintf("rb/limo%s/pos", limoNum));  % Returns table with Data field
     
     % Process the received data
     if ~isempty(posTable)  % Check if we actually received data
@@ -138,9 +144,10 @@ while true
         % MQTT sends data as: [X_horizontal, Z_elevation, Y_horizontal]
         % We want 2D plot showing: X (left/right) vs Y (forward/back)
         % So we take positions 1 and 3, skip position 2 (elevation)
+        % Apply offset to set MoCap origin (-4.5, 2.7) as map origin (0, 0)
         
-        plotX = numericPos(1);  % X position (horizontal, left/right) - MQTT index 1
-        plotY = numericPos(3);  % Y position (horizontal, forward/back) - MQTT index 3
+        plotX = numericPos(1) - MOCAP_ORIGIN_X;  % Transform X: subtract MoCap origin X
+        plotY = -(numericPos(3) - MOCAP_ORIGIN_Y);  % Transform Y: subtract MoCap origin Y and invert (negate)
                                 % Note: numericPos(2) is Z elevation, which we ignore for 2D plot
         
         % ===== UPDATE MARKER POSITION =====
@@ -296,3 +303,6 @@ end
 % colorbar;                                   % Show color scale for time
 % colormap('jet');                            % Use jet colormap (blue→red)
 % axis equal;                                 % Equal scaling%
+
+%%
+%
