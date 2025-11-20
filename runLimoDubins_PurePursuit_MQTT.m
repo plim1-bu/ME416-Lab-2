@@ -1,719 +1,529 @@
-function runLimoDubins_PurePursuit_MQTT()
-% RUNLIMODUBINS_PUREPURSUIT_MQTT - Dubins path planning with Pure Pursuit tracking
-%
-% WHAT THIS DOES:
-% 1. Reads robot's ACTUAL starting position from MQTT MoCap
-% 2. Plans optimal Dubins path to user-specified goal (using MATLAB's dubinsConnection)
-% 3. Uses Pure Pursuit controller to FOLLOW the Dubins path
-% 4. Self-corrects using MoCap feedback if robot drifts off path
-%
-% KEY FEATURE - VELOCITY-BASED HEADING:
-% Instead of using potentially misaligned MoCap rotation data, the robot's
-% heading is calculated from its DIRECTION OF MOTION (velocity vector).
-% This ensures the heading always matches where the robot is actually moving.
-%   heading = atan2(dy/dt, dx/dt)
-%   where dy/dt and dx/dt are the velocity components
-%
-% KEY FEATURE - LOOP RECOVERY:
-% If the robot goes in circles near the goal (e.g., overshoots and loops),
-% the system detects this and enters RECOVERY MODE:
-%   - Detects when robot completes full 360° loops
-%   - After 2 loops, switches to driving straight for 1 second
-%   - This breaks the circular pattern
-%   - Then resumes normal Pure Pursuit control
-% You can adjust: CFG.LOOPS_BEFORE_RECOVERY and CFG.LOOP_RECOVERY_DURATION
+function runLimoPlannerPath_MQTT()
+% RUNLIMOPLANNERPATH_MQTT - Follow a predefined path using Dubins + Pure Pursuit
+% Works with real LIMO hardware using MQTT MoCap feedback
+% 
+% This version allows selection of predefined routes (1, 2, or 3) and
+% configuration of LIMO network parameters
 
-clearvars;
-close all;
+clearvars; close all;
+%% ===============================================
+%% USER INPUT: ROUTE SELECTION AND LIMO CONFIGURATION
+%% ===============================================
+fprintf('\n========================================\n');
+fprintf('  ROUTE AND LIMO CONFIGURATION\n');
+fprintf('========================================\n\n');
 
-% Check for Navigation Toolbox (required for dubinsConnection)
-if ~license('test', 'map_toolbox')
-    error(['Navigation Toolbox is required for Dubins path planning.\n' ...
-           'Install it via: Home > Add-Ons > Get Add-Ons > Search "Navigation Toolbox"']);
+% --- Route Selection ---
+fprintf('Available Routes:\n');
+fprintf('  Route 1: Two-column obstacle course with right-side path\n');
+fprintf('  Route 2: 3x3 grid obstacle pattern\n');
+fprintf('  Route 3: Complex S-shaped path with multiple obstacles\n\n');
+
+% Prompt for route selection with validation
+valid_route = false;
+while ~valid_route
+    route_input = input('Select route (1, 2, or 3): ', 's');
+    route_num = str2double(route_input);
+    
+    % Check if input is valid (1, 2, or 3)
+    if ismember(route_num, [1, 2, 3])
+        valid_route = true;
+    else
+        fprintf('Invalid input. Please enter 1, 2, or 3.\n');
+    end
 end
+
+fprintf('\n--- LIMO Network Configuration ---\n');
+% --- LIMO IP Address Last 3 Digits ---
+fprintf('Enter the last 3 digits of LIMO IP address\n');
+fprintf('Example: Enter "101" for 192.168.1.101\n');
+LIMO_IP_LAST_3 = input('IP last 3 digits: ', 's');
+
+% --- LIMO Number ---
+fprintf('\nEnter LIMO identification number\n');
+fprintf('Example: "777" or "807"\n');
+LIMO_NUMBER = input('LIMO number: ', 's');
+
+fprintf('\nConfiguration Summary:\n');
+fprintf('  Route: %d\n', route_num);
+fprintf('  LIMO IP: 192.168.1.%s\n', LIMO_IP_LAST_3);
+fprintf('  LIMO Number: %s\n', LIMO_NUMBER);
+fprintf('========================================\n\n');
+
+%% ===============================================
+%% ROUTE-SPECIFIC CONFIGURATION
+%% ===============================================
+% Set obstacles, goal, and planned path based on selected route
+switch route_num
+    case 1
+        % Route 1: Two-column obstacle course with right-side path
+        fprintf('Loading Route 1 configuration...\n');
+        
+        % Obstacles: Two vertical columns at x=1.5 and x=3.5
+        obs_xy = [1.5, 1.5,    1.5,    1.5,    1.5,    1.5, 3.5, 3.5,    3.5,    3.5,    3.5,    3.5;
+                  0.0, 0.5,    1.0,    1.5,    2.0,    2.5, 4.5, 4.0,    3.5,    3.0,    2.5,    2.0];
+        
+        % Goal position [x; y]
+        Goal = [5.0; 4.5];
+        
+        % Planned path waypoints (flipped from original reverse order)
+        rx_temp = [5.0, 4.5, 4.0, 4.0, 4.0, 4.0, 3.5, 3.0, 2.5, 2.0, 1.5, 1.0, 0.5, 0.0, 0.0, 0.0, 0.0];
+        ry_temp = [4.5, 4.0, 3.5, 3.0, 2.5, 2.0, 1.5, 2.0, 2.5, 3.0, 3.0, 2.5, 2.0, 1.5, 1.0, 0.5, 0.0];
+        
+        % Flip arrays to get correct forward direction (start -> goal)
+        rx = fliplr(rx_temp);
+        ry = fliplr(ry_temp);
+        
+    case 2
+        % Route 2: 3x3 grid obstacle pattern
+        fprintf('Loading Route 2 configuration...\n');
+        
+        % Obstacles: 3x3 grid at specific locations
+        obs_xy = [1.0, 2.5, 4.0, 0.0, 1.5, 3.0, 1.0, 2.5, 4.0;
+                  1.0, 1.0, 1.0, 2.5, 2.5, 2.5, 4.0, 4.0, 4.0];
+        
+        % Goal position [x; y]
+        Goal = [5.0; 4.5];
+        
+        % Planned path waypoints (as provided in original code)
+        rx = [0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 3.5, 4.0, 4.5, 5.0];
+        ry = [0.0, 0.0, 0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5];
+        
+    case 3
+        % Route 3: Complex S-shaped path with multiple obstacles
+        fprintf('Loading Route 3 configuration...\n');
+        
+        % Obstacles: Complex S-shaped pattern
+        obs_xy = [0.0, 0.5, 1.0, 1.0, 1.0, 1.5, 2.0, 2.5, 2.5, 2.5, 2.5, 3.0, 3.5, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 0.0, 0.5, 1.0, 2.5, 2.5;
+                  1.0, 1.0, 1.0, 1.5, 2.0, 2.0, 2.0, 2.0, 2.5, 3.0, 3.5, 3.5, 3.5, 3.5, 3.0, 2.5, 2.0, 1.5, 1.0, 3.5, 3.5, 3.5, 0.0, 0.5];
+        
+        % Goal position [x; y]
+        Goal = [0.0; 1.5];
+        
+        % Planned path waypoints (as provided in original code)
+        rx = [0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 4.5, 4.5, 4.5, 4.5, 4.5, 4.0, 3.5, 3.0, 2.5, 2.0, 1.5, 1.0, 0.5, 0.0];
+        ry = [0.0, 0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0, 0.5, 1.0, 1.0, 2.0, 2.5, 3.0, 3.5, 4.0, 4.0, 4.0, 4.0, 3.5, 3.0, 2.5, 2.0, 1.5];
+        
+    otherwise
+        % This should never happen due to validation above
+        error('Invalid route number');
+end
+
+% Display route configuration
+fprintf('  Obstacles: %d points\n', size(obs_xy, 2));
+fprintf('  Goal: [%.1f, %.1f]\n', Goal(1), Goal(2));
+fprintf('  Path waypoints: %d points\n\n', length(rx));
 
 %% ===============================================
 %% CONFIGURATION
 %% ===============================================
+% LIMO / Network Configuration
+CFG.limo_ip_prefix = '192.168.1.';
+CFG.limo_port = 12345;
+CFG.mqtt_broker = 'mqtt://rasticvm.lan';
 
-% --- LIMO Configuration (same as your runLimoFeedback_MQTT) ---
-LIMO_NUMBER = '777';      % Your LIMO number
-LIMO_IP_LAST_3 = '101';   % Last 3 digits of LIMO IP address
+% MoCap origin transformation
+CFG.MOCAP_ORIGIN_X = -4.5;
+CFG.MOCAP_ORIGIN_Y = 2.7;
 
-% --- Network Configuration ---
-CFG.limo_ip_prefix = '192.168.1.';           % LIMO IP prefix
-CFG.limo_port = 12345;                       % LIMO TCP port (NOT 8888!)
-CFG.mqtt_broker = 'mqtt://rasticvm.lan';     % MQTT broker address
+% Pure Pursuit Controller Parameters
+CFG.LOOKAHEAD_DISTANCE = 0.5;   % Lookahead distance [m]
+CFG.V_DESIRED = 0.25;           % Desired linear velocity [m/s]
+CFG.MIN_TURNING_RADIUS = 0.25;  % Minimum turning radius for Dubins curves [m]
 
-% --- MoCap Coordinate Transformation (same as Lab2) ---
-CFG.MOCAP_ORIGIN_X = -4.5;  % MoCap X for map origin (0,0)
-CFG.MOCAP_ORIGIN_Y = 2.7;   % MoCap Y for map origin (0,0)
+% Loop Recovery Parameters
+CFG.LOOP_RECOVERY_DURATION = 1.0;      % Time to execute recovery maneuver [s]
+CFG.LOOPS_BEFORE_RECOVERY = 2;         % Number of loops before triggering recovery
 
-% --- Pure Pursuit Controller Parameters ---
-CFG.LOOKAHEAD_DISTANCE = 0.5;  % How far ahead to look on path [m]
-                                % Larger = smoother, cuts corners
-                                % Smaller = tight tracking, oscillates
-                                
-CFG.V_DESIRED = 0.25;           % Desired forward speed [m/s]
-CFG.MIN_TURNING_RADIUS = 0.3;   % Minimum turning radius [m] (LIMO constraint)
+% Goal tolerance
+CFG.GOAL_POSITION_TOL = 0.10;          % Position tolerance to consider goal reached [m]
+CFG.GOAL_HEADING_TOL = deg2rad(25);    % Heading tolerance to consider goal reached [rad]
 
-% --- Loop Recovery Parameters ---
-% If robot goes in circles near goal, it will drive straight to break the loop
-CFG.LOOP_RECOVERY_DURATION = 1.0;  % How long to drive straight [s]
-CFG.LOOPS_BEFORE_RECOVERY = 2;     % Number of loops before recovery kicks in
+% Safety limits
+CFG.MAX_LINEAR_VEL = 0.3;              % Maximum linear velocity [m/s]
+CFG.MAX_ANGULAR_VEL = deg2rad(60);     % Maximum angular velocity [rad/s]
+CFG.MAX_TIME = 360;                    % Maximum execution time [s]
 
-% --- Goal Tolerance ---
-CFG.GOAL_POSITION_TOL = 0.10;      % Within 10 cm = arrived [m]
-CFG.GOAL_HEADING_TOL = deg2rad(10); % Within 10° of goal heading [rad]
+% Control loop timing
+CFG.CONTROL_RATE = 20;                 % Control loop frequency [Hz]
+CFG.dt = 1/CFG.CONTROL_RATE;           % Time step [s]
 
-% --- Safety Limits ---
-CFG.MAX_LINEAR_VEL = 0.3;          % Maximum forward speed [m/s]
-CFG.MAX_ANGULAR_VEL = deg2rad(60); % Maximum turn rate [rad/s] (60°/s)
-CFG.MAX_TIME = 360;                % Maximum execution time [s]
+% Initialize communication objects
+tcp = [];
+mqttClient = [];
 
-% --- Control Loop Timing ---
-CFG.CONTROL_RATE = 20;             % Control frequency [Hz]
-CFG.dt = 1/CFG.CONTROL_RATE;       % Control period [s] (0.05s = 50ms)
+%% ===============================================
+%% EKF INITIALIZATION AND CONFIGURATION
+%% ===============================================
 
-tcp = [];         % TCP client for LIMO
-mqttClient = [];  % MQTT client for MoCap
+% --- 1. Define EKF Tuning Parameters (Q and R) ---
+% Q: Process Noise Covariance (How much we trust the LIMO's kinematic model)
+Q = diag([0.005, 0.005, 0.001]); % [x, y, theta] uncertainty
+% R: Measurement Noise Covariance (How much we trust the MoCap sensor)
+R = diag([0.0001, 0.0001, 0.0001]); % [x, y, theta] - MoCap is highly accurate.
+
+% Get first raw MoCap measurement (z_0) to set the initial state
+fprintf('Initializing EKF with first MoCap reading...\n');
+[z_0, ~] = readPosAndRot(mqttClient, CFG, LIMO_NUMBER); 
+
+% Initial State Estimate (x_hat_prev)
+x_hat_prev = z_0; 
+
+% Initial Covariance (P_prev): High uncertainty for the first guess
+P_prev = eye(3) * 10; 
+
+% Last control command sent (Needed for the prediction step in the first loop)
+last_u = [0; 0]; % [v; omega]
+
+% Set the control loop time step (dt)
+dt = CFG.dt;
 
 try
     %% ===============================================
-    %% USER INPUT
+    %% VALIDATE AND PREPARE PATH
     %% ===============================================
+    fprinitf('Validating planner path...\n');
     
-    fprintf('\n========================================\n');
-    fprintf('  LIMO DUBINS PATH TRACKER (MQTT)\n');
-    fprintf('========================================\n\n');
+    % Get number of waypoints
+    N = length(rx);
     
-    fprintf('--- Configuration ---\n');
-    fprintf('LIMO Number:  %s (from script)\n', LIMO_NUMBER);
-    fprintf('LIMO IP:      192.168.1.%s (from script)\n', LIMO_IP_LAST_3);
-    fprintf('\n');
-    
-    % Build LIMO IP
-    limoNum = LIMO_NUMBER;
-    limo_ip = ['192.168.1.', LIMO_IP_LAST_3];
-    
-    % --- Get Goal from User ---
-    fprintf('Enter GOAL pose (in workspace/map coordinates):\n');
-    fprintf('  Note: Origin (0,0) is at MoCap coords (%.1f, %.1f)\n', ...
-            CFG.MOCAP_ORIGIN_X, CFG.MOCAP_ORIGIN_Y);
-    
-    goal_x = input('  Goal X position [m]: ');
-    goal_y = input('  Goal Y position [m]: ');
-    goal_heading_deg = input('  Goal heading [degrees] (0°=East, 90°=North): ');
-    goal_theta = deg2rad(goal_heading_deg);
-    
-    % Store goal
-    goal.x = goal_x;
-    goal.y = goal_y;
-    goal.theta = goal_theta;
-    
-    fprintf('\n--- Summary ---\n');
-    fprintf('LIMO:         %s @ %s:%d\n', limoNum, limo_ip, CFG.limo_port);
-    fprintf('MQTT Broker:  %s\n', CFG.mqtt_broker);
-    fprintf('Goal:         (%.2f m, %.2f m, %.1f°)\n', ...
-            goal.x, goal.y, goal_heading_deg);
-    fprintf('\n');
-    
-    % Confirm
-    confirm = input('Proceed? (y/n): ', 's');
-    if ~strcmpi(confirm, 'y')
-        fprintf('\nCancelled by user.\n\n');
-        return;
+    % Check that rx and ry have same length
+    if length(ry) ~= N
+        error('rx and ry must have same length');
     end
+    
+    fprintf('  Path validated: %d waypoints\n', N);
+    
+    %% ===============================================
+    %% COMPUTE WAYPOINT HEADINGS
+    %% ===============================================
+    % Compute heading angle between consecutive waypoints
+    waypoints = zeros(N,3);  % [x, y, theta] for each waypoint
+    
+    for i = 1:N-1
+        dx = rx(i+1) - rx(i);
+        dy = ry(i+1) - ry(i);
+        theta = atan2(dy, dx);
+        waypoints(i,:) = [rx(i), ry(i), theta];
+    end
+    
+    % Last waypoint uses same heading as second-to-last segment
+    waypoints(N,:) = [rx(N), ry(N), waypoints(N-1,3)];
+    
     
     %% ===============================================
     %% MQTT CONNECTION
     %% ===============================================
-    
-    fprintf('\n--- MQTT Connection ---\n');
-    fprintf('Connecting to: %s\n', CFG.mqtt_broker);
-    
-    % Create MQTT client
+    fprintf('Connecting to MQTT broker: %s\n', CFG.mqtt_broker);
     mqttClient = mqttclient(CFG.mqtt_broker);
+    % Subscribe to position and rotation topics for this specific LIMO
+    subscribe(mqttClient, sprintf("rb/limo%s/pos", LIMO_NUMBER));
+    subscribe(mqttClient, sprintf("rb/limo%s/rot", LIMO_NUMBER));
+
+    % WAIT 10 SECONDS FOR MQTT DATA TO STABILIZE
+    fprintf('\nWaiting for MoCap data to stabilize...\n');
+    wait_time = 10;  % seconds
     
-    % Subscribe to MoCap topics
-    subscribe(mqttClient, sprintf("rb/limo%s/pos", limoNum));
-    subscribe(mqttClient, sprintf("rb/limo%s/rot", limoNum));
-    
-    fprintf('  ✓ Connected to MQTT\n');
-    fprintf('  ✓ Subscribed to rb/limo%s/pos\n', limoNum);
-    fprintf('  ✓ Subscribed to rb/limo%s/rot\n', limoNum);
-    
-    % Wait for initial data
-    fprintf('  Waiting for MoCap data...\n');
-    pause(2.0);
-    
-    % Verify data (try up to 5 times)
-    fprintf('  Checking data availability...\n');
-    valid = false;
-    for attempt = 1:5
-        [curr_pose, valid] = getRobotPose_MQTT(mqttClient, limoNum, CFG, [], 0);
+    for i = 1:wait_time
+        fprintf('  %d/%d seconds... ', i, wait_time);
+        
+        % Try reading data to verify connection (using the EKF helper function)
+        % Note: This block uses the simplified helper for initial check.
+        [test_pose, valid] = readPosAndRot(mqttClient, CFG, LIMO_NUMBER);
+        
         if valid
-            break;
+            fprintf('✓ Data received: (%.2f, %.2f, %.1f°)\n', ...
+                    test_pose(1), test_pose(2), rad2deg(test_pose(3)));
+        else
+            fprintf('⚠ No data yet\n');
         end
-        fprintf('  Attempt %d/5: No data yet...\n', attempt);
-        pause(1.0);
+        
+        pause(1);
     end
+
+    fprintf('Wait complete.\n\n');
+
+    % Get initial pose with multiple attempts
+    fprintf('Reading initial robot position...\n');
+    valid = false;
+    max_attempts = 10;
+    curr_pose = x_hat_prev; % Start with the EKF initial state
     
-    if ~valid
-        error(['Cannot read MoCap data!\n' ...
-               'Check:\n' ...
-               '  1. Motion capture system is running\n' ...
-               '  2. LIMO%s rigid body is tracked\n' ...
-               '  3. Data is being published to MQTT\n' ...
-               '  4. Your Lab2 script works'], limoNum);
-    end
+    % Use the EKF state which was initialized above
+    start_pose = x_hat_prev; 
     
-    % Store starting pose
-    start.x = curr_pose(1);
-    start.y = curr_pose(2);
-    start.theta = curr_pose(3);
-    
-    fprintf('  ✓ Initial pose: (%.2f, %.2f, %.1f°)\n\n', ...
-            start.x, start.y, rad2deg(start.theta));
+    % --- Initial pose lock check is now skipped as EKF provides a starting point ---
+    fprintf('✓ Initial pose locked via EKF initialization: (%.2f, %.2f, %.1f°)\n', ...
+            start_pose(1), start_pose(2), rad2deg(start_pose(3)));
     
     %% ===============================================
-    %% LIMO CONNECTION
+    %% LIMO TCP CONNECTION
     %% ===============================================
+    % Construct full IP address using prefix and user-provided last 3 digits
+    limo_ip = [CFG.limo_ip_prefix LIMO_IP_LAST_3];
+    fprintf('Connecting to LIMO TCP: %s:%d\n', limo_ip, CFG.limo_port);
     
-    fprintf('--- LIMO Connection ---\n');
-    fprintf('Connecting to: %s:%d\n', limo_ip, CFG.limo_port);
-    
-    % Create TCP client
+    % Create TCP client connection to LIMO
     tcp = tcpclient(limo_ip, CFG.limo_port, 'Timeout', 5);
-    fprintf('  ✓ Connected to LIMO\n\n');
     
-    % Send initial stop command
-    write(tcp, uint8('0.00,0.00'));  % Format: 'v,w' where v=linear, w=angular
+    % Send initial stop command (0 velocity)
+    write(tcp, uint8('0.00,0.00')); 
     pause(0.5);
     
     %% ===============================================
-    %% DUBINS PATH PLANNING (MATLAB Built-in)
+    %% GENERATE DUBINS PATH FOR ALL WAYPOINTS
     %% ===============================================
+    fprintf('Generating Dubins path along waypoints...\n');
     
-    fprintf('--- Dubins Path Planning ---\n');
+    % Initialize empty array to store full Dubins path
+    dubinsPathFull = [];
     
-    % Create Dubins path connection object
-    % This object computes shortest Dubins paths with given turning radius
-    dubinsPathObj = dubinsConnection('MinTurningRadius', CFG.MIN_TURNING_RADIUS);
+    % Create Dubins connection object with minimum turning radius
+    dubinsObj = dubinsConnection('MinTurningRadius', CFG.MIN_TURNING_RADIUS);
     
-    % Define start and goal poses as [x, y, theta] vectors
-    startPose = [start.x, start.y, start.theta];
-    goalPose = [goal.x, goal.y, goal.theta];
-    
-    fprintf('  Start: (%.2f, %.2f, %.1f°)\n', ...
-            startPose(1), startPose(2), rad2deg(startPose(3)));
-    fprintf('  Goal:  (%.2f, %.2f, %.1f°)\n', ...
-            goalPose(1), goalPose(2), rad2deg(goalPose(3)));
-    
-    % Compute Dubins path from start to goal
-    % Returns: pathSegObj - cell array of path segments
-    %          pathCosts - costs (lengths) of each segment type
-    [pathSegObj, pathCosts] = connect(dubinsPathObj, startPose, goalPose);
-    
-    % Check if path was found
-    if isempty(pathSegObj)
-        error('Dubins path planning failed! Check start/goal poses and turning radius.');
+    % Generate smooth Dubins curves between consecutive waypoints
+    for i = 1:N-1
+        start_wp = waypoints(i,:);
+        goal_wp = waypoints(i+1,:);
+        [segObj,~] = connect(dubinsObj, start_wp, goal_wp);
+        
+        if isempty(segObj)
+            error('Dubins path between waypoints %d-%d failed', i, i+1);
+        end
+        
+        segPoints = interpolate(segObj{1}, 0:0.05:segObj{1}.Length);
+        
+        if i>1
+            segPoints = segPoints(2:end,:);
+        end
+        
+        dubinsPathFull = [dubinsPathFull; segPoints];
     end
     
-    % Get path type by checking the segment motions
-    % pathSegObj is a cell array containing the path segments
-    % Each segment has a MotionTypes property showing the maneuvers
-    try
-        motionTypes = pathSegObj{1}.MotionTypes;
-        % Convert motion types to string (e.g., {'L', 'S', 'R'} -> 'LSR')
-        path_type = strjoin(motionTypes, '');
-    catch
-        % If we can't get motion types, just label it as 'Dubins'
-        path_type = 'Dubins';
-    end
+    % Extract path coordinates and calculate arc length
+    path.x = dubinsPathFull(:,1);  % X coordinates [m]
+    path.y = dubinsPathFull(:,2);  % Y coordinates [m]
     
-    % Interpolate the path to get waypoints
-    % Use fine resolution for smooth following (every 0.05 m)
-    path_resolution = 0.05;  % Distance between waypoints [m]
-    totalLength = pathSegObj{1}.Length;  % Total path length [m]
+    % Calculate cumulative arc length along path
+    path.s = [0; cumsum(sqrt(diff(path.x).^2 + diff(path.y).^2))];
     
-    % Generate interpolation distances along path
-    interpDistances = 0:path_resolution:totalLength;
-    
-    % Interpolate path to get [x, y, theta] at each distance
-    pathPoints = interpolate(pathSegObj{1}, interpDistances);
-    
-    % Extract x, y, theta arrays
-    path_x = pathPoints(:, 1);
-    path_y = pathPoints(:, 2);
-    path_theta = pathPoints(:, 3);
-    
-    fprintf('  ✓ Path type: %s\n', path_type);
-    fprintf('  ✓ Path length: %.2f m\n', totalLength);
-    fprintf('  ✓ Waypoints: %d\n\n', length(path_x));
-    
-    % Store path structure
-    path.x = path_x;
-    path.y = path_y;
-    path.theta = path_theta;
-    % Calculate cumulative arc length for lookahead calculation
-    path.s = cumsum([0; sqrt(diff(path_x).^2 + diff(path_y).^2)]);
+    fprintf('Dubins path generated: %d points, length = %.2f m\n', ...
+            length(path.x), path.s(end));
     
     %% ===============================================
     %% VISUALIZATION SETUP
     %% ===============================================
+    figure('Name','LIMO Path Following','Position',[100 100 1000 800]);
     
-    fig = figure('Name', 'LIMO Dubins Path Tracker', 'Position', [100 100 1200 800]);
-    
-    % --- Plot Planned Dubins Path ---
-    plot(path.x, path.y, 'b--', 'LineWidth', 2.5, 'DisplayName', 'Planned Dubins Path');
+    % Plot elements
+    plot(obs_xy(1,:), obs_xy(2,:), 'ro', 'MarkerSize', 10, 'MarkerFaceColor', 'r');
     hold on; grid on; axis equal;
+    plot(rx, ry, 'b-o', 'LineWidth', 1.5, 'DisplayName', 'Waypoints');
+    plot(path.x, path.y, 'c-', 'LineWidth', 2, 'DisplayName', 'Dubins Path');
+    plot(Goal(1), Goal(2), 'g*', 'MarkerSize', 20, 'LineWidth', 2, 'DisplayName', 'Goal');
+    plot(start_pose(1), start_pose(2), 'ms', 'MarkerSize', 15, ...
+         'MarkerFaceColor', 'm', 'DisplayName', 'Start');
     
-    % --- Plot Start ---
-    plot(start.x, start.y, 'go', 'MarkerSize', 15, 'LineWidth', 2, ...
-         'MarkerFaceColor', 'g', 'DisplayName', 'Start');
-    quiver(start.x, start.y, 0.3*cos(start.theta), 0.3*sin(start.theta), ...
-           0, 'g', 'LineWidth', 2, 'MaxHeadSize', 0.8);
-    
-    % --- Plot Goal ---
-    plot(goal.x, goal.y, 'ro', 'MarkerSize', 15, 'LineWidth', 2, ...
-         'MarkerFaceColor', 'r', 'DisplayName', 'Goal');
-    quiver(goal.x, goal.y, 0.3*cos(goal.theta), 0.3*sin(goal.theta), ...
-           0, 'r', 'LineWidth', 2, 'MaxHeadSize', 0.8);
-    
-    % --- Initialize Real-Time Elements ---
-    h_robot = plot(start.x, start.y, 'ko', 'MarkerSize', 10, ...
-                   'MarkerFaceColor', 'blue', 'DisplayName', 'Robot');
-    h_trajectory = plot(start.x, start.y, 'r-', 'LineWidth', 2, ...
-                        'DisplayName', 'Actual Trajectory');
-    h_lookahead = plot(start.x, start.y, 'cs', 'MarkerSize', 10, ...
-                       'MarkerFaceColor', 'c', 'DisplayName', 'Lookahead');
-    h_heading = quiver(start.x, start.y, 0, 0, 0, 'm', 'LineWidth', 2, ...
-                       'MaxHeadSize', 0.8);
+    % Initialize robot trajectory plot
+    trajectory_plot = plot(NaN, NaN, 'k-', 'LineWidth', 1.5, 'DisplayName', 'Actual Path');
+    robot_plot = plot(NaN, NaN, 'ko', 'MarkerSize', 12, ...
+                     'MarkerFaceColor', 'y', 'DisplayName', 'Robot');
+    lookahead_plot = plot(NaN, NaN, 'mo', 'MarkerSize', 10, ...
+                         'MarkerFaceColor', 'm', 'DisplayName', 'Lookahead');
     
     % Labels and legend
-    xlabel('X Position [m]', 'FontSize', 12, 'FontWeight', 'bold');
-    ylabel('Y Position [m]', 'FontSize', 12, 'FontWeight', 'bold');
-    title('LIMO Dubins Path Tracking with Pure Pursuit', 'FontSize', 14);
+    xlabel('X [m]'); ylabel('Y [m]');
+    title(sprintf('LIMO %s - Pure Pursuit Control (Route %d)', LIMO_NUMBER, route_num));
     legend('Location', 'best');
     
-    % Status text box
-    h_text = annotation('textbox', [0.02, 0.85, 0.25, 0.12], ...
-                        'String', 'Starting...', ...
-                        'FitBoxToText', 'off', ...
-                        'BackgroundColor', 'white', ...
-                        'EdgeColor', 'black', ...
-                        'FontSize', 9, ...
-                        'FontName', 'FixedWidth');
-    
     %% ===============================================
-    %% MAIN CONTROL LOOP
+    %% CONTROL LOOP
     %% ===============================================
+    fprintf('\nStarting control loop...\n');
+    fprintf('Goal: (%.2f, %.2f)\n', Goal(1), Goal(2));
     
-    fprintf('--- Path Tracking (Pure Pursuit) ---\n');
-    fprintf('Press Ctrl+C to stop\n\n');
+    % Initialize control variables
+    start_time = tic;                    % Start timer for elapsed time
+    trajectory = start_pose(1:2)';       % Store trajectory for plotting [N x 2]
     
-    % Initialize data logging
-    log.time = [];
-    log.x = [];
-    log.y = [];
-    log.theta = [];
-    log.v_cmd = [];
-    log.omega_cmd = [];
-    log.crosstrack_error = [];
-    log.heading_error = [];
+    % Loop detection variables
+    loop_history = [];
+    loop_counter = 0;
+    recovery_start_time = [];
     
-    % Control loop variables
-    start_time = tic;
-    loop_count = 0;
-    goal_reached = false;
-    
-    traj_x = start.x;  % Trajectory history
-    traj_y = start.y;
-    
-    % Initialize previous pose for velocity-based heading calculation
-    prev_pose = [start.x, start.y, start.theta];
-    prev_time = 0;
-    
-    % --- Loop Detection Variables ---
-    % Track cumulative heading change to detect circular motion
-    cumulative_heading_change = 0;  % Total heading change [rad]
-    loop_counter = 0;                % Number of complete loops detected
-    recovery_mode = false;           % Flag for straight-line recovery
-    recovery_start_time = 0;         % When recovery mode started
-    
-    % --- Main Loop ---
-    while ~goal_reached
-        loop_start = tic;
-        loop_count = loop_count + 1;
+    % Main control loop - runs until goal is reached or timeout
+    while true
+        loop_start = tic;  % Time this iteration for rate control
         
-        % Current time
-        curr_time = toc(start_time);
-        dt = curr_time - prev_time;
+        % --- 1. Get RAW MoCap measurement (z_k) ---
+        [z_k, valid] = readPosAndRot(mqttClient, CFG, LIMO_NUMBER);
         
-        % --- Get Current Pose from MoCap ---
-        % Heading is calculated from velocity direction (direction of motion)
-        [curr_pose, valid] = getRobotPose_MQTT(mqttClient, limoNum, CFG, prev_pose, dt);
-        
-        if ~valid
-            warning('Lost MoCap tracking! Skipping iteration...');
-            pause(CFG.dt);
-            continue;
+        % --- 2. EKF Core Logic (Prediction + Update) ---
+        if valid
+            % Pass previous state, previous covariance, last control input, new measurement, dt, Q, R
+            [x_hat_new, P_new] = kalmanFilter(x_hat_prev, P_prev, last_u, z_k, dt, Q, R);
+            
+            % Update persistent variables for the next cycle
+            x_hat_prev = x_hat_new;
+            P_prev = P_new;
+            
+            % USE FILTERED STATE FOR PURE PURSUIT CONTROL
+            curr_x = x_hat_new(1);
+            curr_y = x_hat_new(2);
+            curr_theta = x_hat_new(3);
+        else
+            % If MoCap data is invalid, maintain the state from the previous valid loop
+            fprintf('⚠ Lost MoCap data - maintaining previous EKF state.\n');
+            curr_x = x_hat_prev(1);
+            curr_y = x_hat_prev(2);
+            curr_theta = x_hat_prev(3);
+            % Skip command calculation, use last command
+            v_cmd = last_u(1);
+            w_cmd = last_u(2);
+            % Go directly to sending command and cleanup
+            
+            % If you choose to STOP the robot on data loss instead, use:
+            % v_cmd = 0.0;
+            % w_cmd = 0.0;
+            
+            % Skip the rest of the control logic below and jump to command sending
+            cmd_str = sprintf('%.2f,%.2f', v_cmd, w_cmd);
+            write(tcp, uint8(cmd_str));
+            
+            % Update loop time for the next iteration
+            elapsed = toc(loop_start);
+            if elapsed < CFG.dt
+                pause(CFG.dt - elapsed);
+            end
+            continue; % Skip to next loop iteration
         end
         
-        % Extract current state
-        x = curr_pose(1);       % Current X [m]
-        y = curr_pose(2);       % Current Y [m]
-        theta = curr_pose(3);   % Current heading [rad] - FROM VELOCITY DIRECTION!
+        % Calculate elapsed time
+        curr_time = toc(start_time);
+        
+        % --- Check if goal is reached ---
+        dist_to_goal = sqrt((curr_x - Goal(1))^2 + (curr_y - Goal(2))^2);
+        
+        if dist_to_goal < CFG.GOAL_POSITION_TOL
+            fprintf('\n✓ Goal reached! Time: %.1f s\n', curr_time);
+            write(tcp, uint8('0.00,0.00'));  % Stop robot
+            break;
+        end
+        
+        % --- Pure Pursuit: Find lookahead point ---
+        [lookahead_x, lookahead_y, lookahead_idx, crosstrack_error] = ...
+            findLookaheadPoint(curr_x, curr_y, path, CFG.LOOKAHEAD_DISTANCE);
         
         % --- Loop Detection Logic ---
-        % Calculate heading change since last iteration
-        if loop_count > 1
-            heading_change = wrapToPi(theta - prev_pose(3));
-            cumulative_heading_change = cumulative_heading_change + abs(heading_change);
+        loop_history = [loop_history, crosstrack_error];
+        if length(loop_history) > 30
+            loop_history = loop_history(end-29:end);
+        end
+        
+        if length(loop_history) >= 30
+            sign_changes = sum(diff(sign(loop_history)) ~= 0);
             
-            % Check if completed a full loop (360 degrees = 2*pi radians)
-            if cumulative_heading_change >= 2*pi
+            if sign_changes >= 20
                 loop_counter = loop_counter + 1;
-                cumulative_heading_change = 0;  % Reset for next loop detection
-                fprintf('  ! Loop detected (#%d)\n', loop_counter);
+                fprintf('⚠ Loop detected! Count: %d\n', loop_counter);
                 
-                % If we've looped enough times, enter recovery mode
-                if loop_counter >= CFG.LOOPS_BEFORE_RECOVERY
-                    recovery_mode = true;
-                    recovery_start_time = curr_time;
-                    loop_counter = 0;  % Reset loop counter
-                    fprintf('  >> RECOVERY MODE: Driving straight for %.1f seconds\n', ...
-                            CFG.LOOP_RECOVERY_DURATION);
+                if loop_counter >= CFG.LOOPS_BEFORE_RECOVERY && isempty(recovery_start_time)
+                    fprintf('→ Starting recovery maneuver\n');
+                    recovery_start_time = tic;
+                    loop_counter = 0;
+                    loop_history = [];
                 end
             end
         end
         
-        % Update previous pose and time for next iteration
-        prev_pose = curr_pose;
-        prev_time = curr_time;
-        
-        % --- Calculate Distance to Goal ---
-        dx = goal.x - x;
-        dy = goal.y - y;
-        dist_to_goal = sqrt(dx^2 + dy^2);
-        heading_error_to_goal = wrapToPi(goal.theta - theta);
-        
-        % --- Check if Goal Reached ---
-        if (dist_to_goal < CFG.GOAL_POSITION_TOL) && ...
-           (abs(heading_error_to_goal) < CFG.GOAL_HEADING_TOL)
-            goal_reached = true;
-            fprintf('\n✓✓✓ GOAL REACHED! ✓✓✓\n');
-            fprintf('  Final position error: %.3f m\n', dist_to_goal);
-            fprintf('  Final heading error: %.1f°\n', rad2deg(heading_error_to_goal));
-            break;
-        end
-        
-        % --- Control Mode Selection: Recovery or Pure Pursuit ---
-        if recovery_mode
-            % --- RECOVERY MODE: Drive Straight ---
-            % Check if recovery period is over
-            if (curr_time - recovery_start_time) >= CFG.LOOP_RECOVERY_DURATION
-                recovery_mode = false;
-                cumulative_heading_change = 0;  % Reset loop detection
-                fprintf('  << Recovery complete, resuming Pure Pursuit\n');
+        % --- Execute Recovery Maneuver if Needed ---
+        if ~isempty(recovery_start_time)
+            recovery_elapsed = toc(recovery_start_time);
+            
+            if recovery_elapsed < CFG.LOOP_RECOVERY_DURATION
+                v_cmd = -CFG.V_DESIRED * 0.5;
+                w_cmd = 0.0;
+                fprintf('  Recovery: backing up (%.1f/%.1f s)\n', ...
+                       recovery_elapsed, CFG.LOOP_RECOVERY_DURATION);
+            else
+                fprintf('✓ Recovery complete\n');
+                recovery_start_time = [];
             end
-            
-            % Drive straight at current heading (no turning)
-            v_cmd = CFG.V_DESIRED;
-            omega = 0;  % Zero angular velocity = straight line!
-            
-            % Set dummy values for logging
-            lookahead_x = x + 0.5 * cos(theta);
-            lookahead_y = y + 0.5 * sin(theta);
-            crosstrack_error = NaN;  % Not tracking path during recovery
-            heading_error = 0;
-            
         else
-            % --- NORMAL MODE: Pure Pursuit Path Tracking ---
-            % Find the lookahead point on the planned path
-            [lookahead_x, lookahead_y, ~, crosstrack_error] = ...
-                findLookaheadPoint(x, y, path, CFG.LOOKAHEAD_DISTANCE);
+            % --- Normal Pure Pursuit Control ---
+            dx = lookahead_x - curr_x;
+            dy = lookahead_y - curr_y;
+            desired_theta = atan2(dy, dx);
             
-            % Calculate angle to lookahead point
-            alpha = atan2(lookahead_y - y, lookahead_x - x);
+            theta_error = wrapToPi(desired_theta - curr_theta);
+            lookahead_dist = sqrt(dx^2 + dy^2);
             
-            % Calculate heading error (how much to turn)
-            heading_error = wrapToPi(alpha - theta);
+            % Pure Pursuit angular velocity formula
+            w_cmd = (2 * CFG.V_DESIRED * sin(theta_error)) / lookahead_dist;
             
-            % Pure Pursuit control law
-            % Curvature = 2*sin(heading_error) / lookahead_distance
-            curvature = (2 * sin(heading_error)) / CFG.LOOKAHEAD_DISTANCE;
-            
-            % Convert to angular velocity: ω = v * κ
-            omega = CFG.V_DESIRED * curvature;
-            
-            % Apply limits
-            omega = max(-CFG.MAX_ANGULAR_VEL, min(CFG.MAX_ANGULAR_VEL, omega));
-            v_cmd = CFG.V_DESIRED;
+            % Linear velocity: reduce speed when heading error is large
+            v_cmd = CFG.V_DESIRED * cos(theta_error);
         end
         
-        % --- Send Command to LIMO ---
-        % Format: 'v,w' where v=linear [m/s], w=angular [rad/s]
-        cmd_str = sprintf('%.2f,%.2f', v_cmd, omega);
+        % --- Apply velocity limits (safety) ---
+        v_cmd = max(-CFG.MAX_LINEAR_VEL, min(v_cmd, CFG.MAX_LINEAR_VEL));
+        w_cmd = max(-CFG.MAX_ANGULAR_VEL, min(w_cmd, CFG.MAX_ANGULAR_VEL));
+        
+        % --- Send velocity command to LIMO ---
+        cmd_str = sprintf('%.2f,%.2f', v_cmd, w_cmd);
         write(tcp, uint8(cmd_str));
+
+        % --- Save command for EKF prediction in the next loop ---
+        last_u = [v_cmd; w_cmd]; 
         
-        % --- Update Visualization ---
-        set(h_robot, 'XData', x, 'YData', y);
+        % --- Update visualization ---
+        trajectory = [trajectory; curr_x, curr_y];
         
-        traj_x(end+1) = x;
-        traj_y(end+1) = y;
-        set(h_trajectory, 'XData', traj_x, 'YData', traj_y);
+        set(robot_plot, 'XData', curr_x, 'YData', curr_y);
+        set(trajectory_plot, 'XData', trajectory(:,1), 'YData', trajectory(:,2));
+        set(lookahead_plot, 'XData', lookahead_x, 'YData', lookahead_y);
         
-        set(h_lookahead, 'XData', lookahead_x, 'YData', lookahead_y);
-        
-        heading_vec_x = 0.3 * cos(theta);
-        heading_vec_y = 0.3 * sin(theta);
-        set(h_heading, 'XData', x, 'YData', y, ...
-                       'UData', heading_vec_x, 'VData', heading_vec_y);
-        
-        % Update status text
-        t = toc(start_time);
-        if recovery_mode
-            % Show RECOVERY MODE status
-            status_str = sprintf(['**RECOVERY MODE**\n' ...
-                                  'Time: %.1f s | Iter: %d\n' ...
-                                  'Pos: (%.2f, %.2f) m\n' ...
-                                  'Heading: %.1f°\n' ...
-                                  'Dist to goal: %.2f m\n' ...
-                                  'Driving STRAIGHT\n' ...
-                                  'v: %.2f m/s | ω: 0°/s'], ...
-                                  t, loop_count, x, y, rad2deg(theta), ...
-                                  dist_to_goal, v_cmd);
-        else
-            % Normal Pure Pursuit status
-            status_str = sprintf(['Time: %.1f s | Iter: %d\n' ...
-                                  'Pos: (%.2f, %.2f) m\n' ...
-                                  'Heading: %.1f°\n' ...
-                                  'Dist to goal: %.2f m\n' ...
-                                  'XTE: %.3f m\n' ...
-                                  'v: %.2f m/s\n' ...
-                                  'ω: %.1f °/s'], ...
-                                  t, loop_count, x, y, rad2deg(theta), ...
-                                  dist_to_goal, crosstrack_error, ...
-                                  v_cmd, rad2deg(omega));
-        end
-        set(h_text, 'String', status_str);
+        % Update title with status information
+        title(sprintf('LIMO %s - Route %d | t=%.1fs | d2goal=%.2fm | CTE=%.3fm | v=%.2f, w=%.1f°/s', ...
+                     LIMO_NUMBER, route_num, curr_time, dist_to_goal, crosstrack_error, ...
+                     v_cmd, rad2deg(w_cmd)));
         
         drawnow limitrate;
         
-        % --- Log Data ---
-        log.time(end+1) = t;
-        log.x(end+1) = x;
-        log.y(end+1) = y;
-        log.theta(end+1) = theta;
-        log.v_cmd(end+1) = v_cmd;
-        log.omega_cmd(end+1) = omega;
-        log.crosstrack_error(end+1) = crosstrack_error;
-        log.heading_error(end+1) = heading_error;
-        
-        % --- Print Status (every second) ---
-        if mod(loop_count, CFG.CONTROL_RATE) == 0
-            fprintf('t=%.1fs | Pos=(%.2f,%.2f,%.0f°) | Dist=%.2fm | XTE=%.3fm | v=%.2f ω=%.1f°/s\n', ...
-                    t, x, y, rad2deg(theta), dist_to_goal, crosstrack_error, ...
-                    v_cmd, rad2deg(omega));
-        end
-        
-        % --- Safety Timeout ---
-        if t > CFG.MAX_TIME
-            fprintf('\n✗ TIMEOUT after %.0f seconds\n', CFG.MAX_TIME);
+        % --- Safety timeout check ---
+        if curr_time > CFG.MAX_TIME
+            fprintf('✗ Timeout reached\n'); 
             break;
         end
         
-        % --- Maintain Loop Timing ---
+        % --- Maintain control loop rate ---
         elapsed = toc(loop_start);
         if elapsed < CFG.dt
             pause(CFG.dt - elapsed);
         end
     end
     
-    %% ===============================================
-    %% SUMMARY
-    %% ===============================================
-    
-    fprintf('\n========================================\n');
-    fprintf('         EXECUTION SUMMARY\n');
-    fprintf('========================================\n');
-    
-    if ~isempty(log.time)
-        fprintf('Total time: %.1f s\n', log.time(end));
-        fprintf('Control loops: %d\n', loop_count);
-        fprintf('Average speed: %.3f m/s\n', mean(log.v_cmd));
-        fprintf('\nTracking Errors:\n');
-        fprintf('  RMS crosstrack: %.3f m\n', sqrt(mean(log.crosstrack_error.^2)));
-        fprintf('  Mean crosstrack: %.3f m\n', mean(abs(log.crosstrack_error)));
-        fprintf('  Max crosstrack: %.3f m\n', max(abs(log.crosstrack_error)));
-        
-        if goal_reached
-            fprintf('\nFinal errors:\n');
-            fprintf('  Position: %.3f m\n', dist_to_goal);
-            fprintf('  Heading: %.1f°\n', rad2deg(heading_error_to_goal));
-        end
-        
-        % --- Performance Plots ---
-        figure('Name', 'Performance Analysis', 'Position', [100 100 1200 800]);
-        
-        subplot(3,1,1);
-        plot(log.time, log.crosstrack_error*100, 'b-', 'LineWidth', 1.5);
-        grid on;
-        xlabel('Time [s]');
-        ylabel('Crosstrack Error [cm]');
-        title('Distance from Dubins Path');
-        yline(0, 'k--');
-        
-        subplot(3,1,2);
-        plot(log.time, rad2deg(log.heading_error), 'r-', 'LineWidth', 1.5);
-        grid on;
-        xlabel('Time [s]');
-        ylabel('Heading Error [°]');
-        title('Heading Error to Lookahead');
-        yline(0, 'k--');
-        
-        subplot(3,1,3);
-        yyaxis left;
-        plot(log.time, log.v_cmd, 'g-', 'LineWidth', 1.5);
-        ylabel('Linear Vel [m/s]');
-        yyaxis right;
-        plot(log.time, rad2deg(log.omega_cmd), 'm-', 'LineWidth', 1.5);
-        ylabel('Angular Vel [°/s]');
-        xlabel('Time [s]');
-        title('Velocity Commands');
-        grid on;
-    end
-    
-    fprintf('========================================\n\n');
-    
 catch ME
-    fprintf('\n✗ ERROR: %s\n', ME.message);
+    % Error handling
+    fprintf('Error: %s\n', ME.message);
     if ~isempty(ME.stack)
-        fprintf('  In: %s (line %d)\n\n', ME.stack(1).name, ME.stack(1).line);
+        fprintf('  In: %s (line %d)\n', ME.stack(1).name, ME.stack(1).line);
     end
 end
 
 %% ===============================================
 %% CLEANUP
 %% ===============================================
-
-fprintf('Cleaning up...\n');
-
-% Stop robot
+% Ensure robot is stopped and connections are closed
 if ~isempty(tcp) && isvalid(tcp)
     write(tcp, uint8('0.00,0.00'));
-    pause(0.5);
+    pause(0.5); 
     clear tcp;
-    fprintf('  ✓ LIMO stopped\n');
 end
-
-% Disconnect MQTT
 if ~isempty(mqttClient)
     clear mqttClient;
-    fprintf('  ✓ MQTT disconnected\n');
 end
-
-fprintf('\nScript complete.\n\n');
-
-end
-
-%% ===============================================
-%% HELPER FUNCTION: GET ROBOT POSE FROM MQTT
-%% ===============================================
-
-function [pose, valid] = getRobotPose_MQTT(mqttClient, limoNum, CFG, prev_pose, dt)
-% GETROBOTPOSE_MQTT - Read robot pose from MQTT MoCap
-%
-% HEADING CALCULATION:
-% Instead of using rotation data (which can be noisy/misaligned),
-% we calculate heading from the DIRECTION OF MOTION (velocity vector).
-% heading = atan2(dy/dt, dx/dt)
-%
-% INPUTS:
-%   mqttClient - MQTT client
-%   limoNum - LIMO number string
-%   CFG - Configuration struct
-%   prev_pose - Previous pose [x, y, theta] (for velocity calculation)
-%   dt - Time step since last reading [s]
-%
-% OUTPUTS:
-%   pose - [x, y, theta] where theta is from velocity direction
-%   valid - Boolean if data is good
-
-    pose = [0, 0, 0];
-    valid = false;
-    
-    try
-        % --- Read Position ---
-        posTable = read(mqttClient, 'Topic', sprintf("rb/limo%s/pos", limoNum));
-        
-        if isempty(posTable)
-            return;
-        end
-        
-        rawData = posTable.Data{end};
-        rawData = erase(rawData, ["[", "]"]);
-        numericPos = str2double(split(rawData, ","))';
-        
-        if any(isnan(numericPos))
-            return;
-        end
-        
-        % Transform: MoCap [X, Z, Y] to Map [x, y]
-        mocap_x = numericPos(1);
-        mocap_y = numericPos(3);  % Y is 3rd element!
-        
-        x = mocap_x - CFG.MOCAP_ORIGIN_X;
-        y = -(mocap_y - CFG.MOCAP_ORIGIN_Y);  % Negated!
-        
-        % --- Calculate Heading from Velocity Direction ---
-        if ~isempty(prev_pose) && dt > 0
-            % Calculate velocity vector
-            dx = x - prev_pose(1);  % Change in X [m]
-            dy = y - prev_pose(2);  % Change in Y [m]
-            
-            % Calculate speed
-            speed = sqrt(dx^2 + dy^2) / dt;  % [m/s]
-            
-            % Only update heading if robot is moving
-            % (avoids noise when stationary)
-            speed_threshold = 0.05;  % Minimum speed to update heading [m/s]
-            
-            if speed > speed_threshold
-                % Heading = direction of motion
-                theta = atan2(dy, dx);  % [rad]
-            else
-                % Robot is stationary - keep previous heading
-                theta = prev_pose(3);
-            end
-        else
-            % First reading - read from rotation data as initial heading
-            rotTable = read(mqttClient, 'Topic', sprintf("rb/limo%s/rot", limoNum));
-            
-            if ~isempty(rotTable)
-                rawRot = rotTable.Data{end};
-                rawRot = erase(rawRot, ["[", "]"]);
-                rot_values = str2double(split(rawRot, ","))';
-                
-                if ~any(isnan(rot_values)) && length(rot_values) >= 3
-                    % Use yaw from rotation data as initial heading
-                    theta = -rot_values(3);  % Negate to match Y-axis flip
-                else
-                    theta = 0;  % Default to facing East
-                end
-            else
-                theta = 0;  % Default to facing East
-            end
-        end
-        
-        pose = [x, y, theta];
-        valid = true;
-        
-    catch
-        % Error in data read
-    end
+fprintf('Script complete.\n\n');
 end
 
 %% ===============================================
@@ -722,33 +532,21 @@ end
 
 function [lookahead_x, lookahead_y, lookahead_idx, crosstrack_error] = ...
     findLookaheadPoint(robot_x, robot_y, path, lookahead_distance)
-% FINDLOOKAHEADPOINT - Find point on path at lookahead distance
-%
-% INPUTS:
-%   robot_x, robot_y - Current position
-%   path - Structure with .x, .y, .s (arc length)
-%   lookahead_distance - Distance ahead to look
-%
-% OUTPUTS:
-%   lookahead_x, lookahead_y - Lookahead coordinates
-%   lookahead_idx - Index in path
-%   crosstrack_error - Distance from path
+% FINDLOOKAHEADPOINT - Find point on path at lookahead distance ahead
 
-    % Find closest point on path
+    % --- Find closest point on path to robot ---
     distances = sqrt((path.x - robot_x).^2 + (path.y - robot_y).^2);
     [crosstrack_error, closest_idx] = min(distances);
     
-    % Arc length at closest point
+    % --- Find lookahead point ---
     s_closest = path.s(closest_idx);
-    
-    % Desired arc length (lookahead ahead)
     s_lookahead = s_closest + lookahead_distance;
     
-    % Find point at lookahead arc length
     if s_lookahead > path.s(end)
-        lookahead_idx = length(path.x);  % Use goal
+        lookahead_idx = length(path.x);
     else
         lookahead_idx = find(path.s >= s_lookahead, 1, 'first');
+        
         if isempty(lookahead_idx)
             lookahead_idx = length(path.x);
         end
@@ -756,4 +554,54 @@ function [lookahead_x, lookahead_y, lookahead_idx, crosstrack_error] = ...
     
     lookahead_x = path.x(lookahead_idx);
     lookahead_y = path.y(lookahead_idx);
+end
+
+%% ===============================================
+%% HELPER FUNCTION: READ POSITION AND ROTATION
+%% ===============================================
+
+function [z_k, valid] = readPosAndRot(mqttClient, CFG, LIMO_NUMBER)
+% READPOSANDROT - Reads, parses, and transforms the latest MoCap data from MQTT.
+% Returns z_k: [x; y; theta] in MAP coordinates.
+
+    valid = false;
+    z_k = [NaN; NaN; NaN];
+    
+    % --- Topics ---
+    posTopic = sprintf('rb/limo%s/pos', LIMO_NUMBER);
+    rotTopic = sprintf('rb/limo%s/rot', LIMO_NUMBER);
+    
+    % --- Read Data ---
+    posTable = read(mqttClient, Topic=posTopic);
+    rotTable = read(mqttClient, Topic=rotTopic);
+
+    if ~isempty(posTable) && ~isempty(rotTable)
+        try
+            % 1. Parse Position Data
+            posData = posTable.Data{end};
+            posData = erase(posData, ['[', ']']);
+            mocapPos = str2double(split(posData, ','))'; % [X, Z, Y]
+            
+            % 2. Parse Rotation Data
+            rotData = rotTable.Data{end};
+            rotData = erase(rotData, ['[', ']']);
+            mocapRot = str2double(split(rotData, ','))'; % [Roll, Pitch, Yaw]
+
+            % 3. Apply MoCap to Map Transformation (using CFG variables)
+            x_mocap = mocapPos(1);  % X from MoCap
+            y_mocap = mocapPos(3);  % Y from MoCap (third element)
+            theta_mocap = mocapRot(3); % Yaw (heading) from MoCap
+            
+            % Transformation (subtract MoCap origin to get Map coordinates)
+            x_map = x_mocap - CFG.MOCAP_ORIGIN_X; 
+            y_map = y_mocap - CFG.MOCAP_ORIGIN_Y;
+            
+            % Final measurement vector [x; y; theta]
+            z_k = [x_map; y_map; theta_mocap];
+            valid = true;
+            
+        catch
+            % Parsing or conversion failed
+        end
+    end
 end
