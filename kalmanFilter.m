@@ -48,12 +48,7 @@ function [x_hat_new, P_new] = kalmanFilter(x_hat_prev, P_prev, u_k, z_k, dt, Q, 
     yk = z_k - x_hat_minus;
     
     % Wrap theta in (-pi, pi]
-    while yk(3) > pi
-        yk(3) = yk(3) - 2*pi;
-    end
-    while yk(3) <= -pi
-        yk(3) = yk(3) + 2*pi;
-    end
+    yk(3) = wrap2pi(yk(3));
     
     % Updated State Estimate (x_hat_new)
     x_hat_new = x_hat_minus + K * yk;
