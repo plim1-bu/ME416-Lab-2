@@ -251,6 +251,7 @@ try
             else
                 v_cmd = CFG.V_DESIRED * 0.3;
             end
+        end
         
         v_cmd = max(0, min(v_cmd, CFG.MAX_LINEAR_VEL));
         w_cmd = max(-CFG.MAX_ANGULAR_VEL, min(w_cmd, CFG.MAX_ANGULAR_VEL));
@@ -339,4 +340,3 @@ function [lookahead_x, lookahead_y, lookahead_idx, crosstrack_error] = ...
     lookahead_x = path.x(lookahead_idx); lookahead_y = path.y(lookahead_idx);
 
 end
-
