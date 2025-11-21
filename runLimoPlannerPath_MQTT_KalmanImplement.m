@@ -246,8 +246,11 @@ try
             
             % Pure Pursuit Control Law (Coulter 1992)
             w_cmd = (2 * CFG.V_DESIRED * sin(theta_error)) / lookahead_dist;
-            v_cmd = (abs(theta_error) < deg2rad(90)) ? CFG.V_DESIRED * cos(theta_error) : CFG.V_DESIRED * 0.3;
-        end
+            if abs(theta_error) < deg2rad(90)
+                v_cmd = CFG.V_DESIRED * cos(theta_error);
+            else
+                v_cmd = CFG.V_DESIRED * 0.3;
+            end
         
         v_cmd = max(0, min(v_cmd, CFG.MAX_LINEAR_VEL));
         w_cmd = max(-CFG.MAX_ANGULAR_VEL, min(w_cmd, CFG.MAX_ANGULAR_VEL));
@@ -332,4 +335,5 @@ function [lookahead_x, lookahead_y, lookahead_idx, crosstrack_error] = ...
     lookahead_idx = find(path.s >= s_lookahead, 1, 'first');
     if isempty(lookahead_idx), lookahead_idx = length(path.x); end
     lookahead_x = path.x(lookahead_idx); lookahead_y = path.y(lookahead_idx);
+
 end
