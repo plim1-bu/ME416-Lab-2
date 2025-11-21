@@ -275,7 +275,7 @@ try
 
         % Plot 1: Trajectory Map
         subplot(1, 2, 1);
-        plot(log_raw(:,2), log_raw(:,3), 'r.', 'MarkerSize', 4, 'DisplayName', 'Raw (Noisy)');
+        plot(log_raw(:,2), log_raw(:,3), 'ro', 'MarkerSize', 4, 'DisplayName', 'Raw (Noisy)');
         hold on;
         plot(log_ekf(:,2), log_ekf(:,3), 'b-', 'LineWidth', 2, 'DisplayName', 'EKF (Smooth)');
         grid on; axis equal; legend('Location', 'best');
@@ -307,7 +307,9 @@ end
 function [pose, valid] = getRobotPose_MQTT(mqttClient, limoNum, CFG, prev_pose, dt)
     pose = [0, 0, 0]; valid = false;
     try
-        mqttMsg = peek(mqttClient);
+        if height(mqttMsg) > 1
+            mqttMsg = mqttMsg(end, :);
+        end
         if isempty(mqttMsg), return; end
         expected_topic = sprintf('rb/limo%s', limoNum);
         if ~strcmp(char(mqttMsg.Topic), expected_topic), return; end
@@ -337,3 +339,4 @@ function [lookahead_x, lookahead_y, lookahead_idx, crosstrack_error] = ...
     lookahead_x = path.x(lookahead_idx); lookahead_y = path.y(lookahead_idx);
 
 end
+
