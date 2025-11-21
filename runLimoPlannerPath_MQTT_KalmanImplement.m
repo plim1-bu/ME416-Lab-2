@@ -1,13 +1,4 @@
 function runLimoPlannerPath_MQTT_KalmanImplement()
-% RUNLIMOPLANNERPATH_MQTT_FINAL - Path following with EKF and Pure Pursuit
-%
-% OBJECTIVES FULFILLED:
-% 1. Path Planning (Phase 2): Follows A* generated waypoints.
-% 2. Feedback Control (Phase 3): Uses Pure Pursuit (Coulter 1992).
-% 3. Loop Recovery (Sidequest): Detects circular loops and recovers.
-% 4. Kalman Filter (Sidequest): Fuses Model (Odometry) + Measurement (MoCap).
-% 5. Analysis: Plots Raw vs Filtered data for report comparison.
-
 clearvars; close all;
 
 %% ===============================================
@@ -289,7 +280,6 @@ try
 
         % Plot 1: Trajectory Map
         subplot(1, 2, 1);
-        % Using open circles 'ro' allows the blue line to be seen through them
         plot(log_raw(:,2), log_raw(:,3), 'ro', 'MarkerSize', 5, 'LineWidth', 0.5, 'DisplayName', 'Raw (Noisy)');
         hold on;
         plot(log_ekf(:,2), log_ekf(:,3), 'b-', 'LineWidth', 2, 'DisplayName', 'EKF (Smooth)');
@@ -372,3 +362,4 @@ function [lookahead_x, lookahead_y, lookahead_idx, crosstrack_error] = ...
     lookahead_x = path.x(lookahead_idx);
     lookahead_y = path.y(lookahead_idx);
 end
+
