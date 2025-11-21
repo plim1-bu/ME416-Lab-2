@@ -138,6 +138,17 @@ try
     [start_pose, valid] = getRobotPose_MQTT(mqttClient, LIMO_NUMBER, CFG, [], 0);
     if ~valid, error('Could not get initial MoCap lock.'); end
     
+    % Smooth Start: Prepend current position to path
+    rx = [start_pose(1), rx];
+    ry = [start_pose(2), ry];
+    N = length(rx); 
+    waypoints = zeros(N,3);
+    for i = 1:N-1
+        dx = rx(i+1) - rx(i); dy = ry(i+1) - ry(i);
+        waypoints(i,:) = [rx(i), ry(i), atan2(dy, dx)];
+    end
+    waypoints(N,:) = [rx(N), ry(N), waypoints(N-1,3)];
+    
     x_hat_prev = start_pose'; 
     P_prev = eye(3) * 0.1;    
 
@@ -219,6 +230,7 @@ try
         end
         
         % 7. Pure Pursuit Control
+        % See diagram below for geometry
         [lookahead_x, lookahead_y, ~, crosstrack_error] = ...
             findLookaheadPoint(curr_x, curr_y, path, CFG.LOOKAHEAD_DISTANCE);
             
@@ -246,6 +258,7 @@ try
             
             % Pure Pursuit Control Law (Coulter 1992)
             w_cmd = (2 * CFG.V_DESIRED * sin(theta_error)) / lookahead_dist;
+            
             if abs(theta_error) < deg2rad(90)
                 v_cmd = CFG.V_DESIRED * cos(theta_error);
             else
@@ -276,7 +289,8 @@ try
 
         % Plot 1: Trajectory Map
         subplot(1, 2, 1);
-        plot(log_raw(:,2), log_raw(:,3), 'ro', 'MarkerSize', 4, 'DisplayName', 'Raw (Noisy)');
+        % Using open circles 'ro' allows the blue line to be seen through them
+        plot(log_raw(:,2), log_raw(:,3), 'ro', 'MarkerSize', 5, 'LineWidth', 0.5, 'DisplayName', 'Raw (Noisy)');
         hold on;
         plot(log_ekf(:,2), log_ekf(:,3), 'b-', 'LineWidth', 2, 'DisplayName', 'EKF (Smooth)');
         grid on; axis equal; legend('Location', 'best');
@@ -284,17 +298,20 @@ try
 
         % Plot 2: X-Position vs Time
         subplot(1, 2, 2);
-        plot(log_raw(:,1), log_raw(:,2), 'r.', 'MarkerSize', 4);
+        plot(log_raw(:,1), log_raw(:,2), 'ro', 'MarkerSize', 4);
         hold on;
         plot(log_ekf(:,1), log_ekf(:,2), 'b-', 'LineWidth', 1.5);
         grid on; legend('Raw', 'EKF');
         xlabel('Time [s]'); ylabel('X Position [m]'); title('Noise Reduction (X-Axis)');
         
         fprintf('\nComparison plots generated.\n');
+    else
+        fprintf('\nWARNING: Log buffers empty. Robot likely did not run or no valid data received.\n');
     end
 
 catch ME
     fprintf('Error: %s\n', ME.message);
+    if ~isempty(ME.stack), fprintf('Line: %d\n', ME.stack(1).line); end
 end
 
 if ~isempty(tcp), write(tcp, uint8('0.00,0.00')); clear tcp; end
@@ -308,16 +325,28 @@ end
 function [pose, valid] = getRobotPose_MQTT(mqttClient, limoNum, CFG, prev_pose, dt)
     pose = [0, 0, 0]; valid = false;
     try
+        % --- FIXED: Read the message BEFORE checking its height! ---
+        mqttMsg = peek(mqttClient); 
+        
+        if isempty(mqttMsg), return; end
+        
         if height(mqttMsg) > 1
             mqttMsg = mqttMsg(end, :);
         end
-        if isempty(mqttMsg), return; end
+        
         expected_topic = sprintf('rb/limo%s', limoNum);
         if ~strcmp(char(mqttMsg.Topic), expected_topic), return; end
-        jsonData = jsondecode(char(mqttMsg.Data));
+        
+        % Check if Data is cell or string
+        dataStr = char(mqttMsg.Data);
+        if iscell(dataStr), dataStr = dataStr{1}; end
+        
+        jsonData = jsondecode(dataStr);
         if ~isfield(jsonData, 'pos'), return; end
+        
         x = jsonData.pos(1) - CFG.MOCAP_ORIGIN_X;
         y = -(jsonData.pos(3) - CFG.MOCAP_ORIGIN_Y); 
+        
         if ~isempty(prev_pose) && dt > 0
             dx = x - prev_pose(1); dy = y - prev_pose(2);
             speed = sqrt(dx^2 + dy^2) / dt;
@@ -332,11 +361,14 @@ end
 
 function [lookahead_x, lookahead_y, lookahead_idx, crosstrack_error] = ...
     findLookaheadPoint(robot_x, robot_y, path, lookahead_distance)
+    
     distances = sqrt((path.x - robot_x).^2 + (path.y - robot_y).^2);
     [crosstrack_error, closest_idx] = min(distances);
+    
     s_lookahead = path.s(closest_idx) + lookahead_distance;
     lookahead_idx = find(path.s >= s_lookahead, 1, 'first');
     if isempty(lookahead_idx), lookahead_idx = length(path.x); end
-    lookahead_x = path.x(lookahead_idx); lookahead_y = path.y(lookahead_idx);
-
+    
+    lookahead_x = path.x(lookahead_idx);
+    lookahead_y = path.y(lookahead_idx);
 end
