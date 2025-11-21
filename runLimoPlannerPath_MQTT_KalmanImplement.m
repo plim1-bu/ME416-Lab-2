@@ -1,4 +1,13 @@
 function runLimoPlannerPath_MQTT_KalmanImplement()
+% RUNLIMOPLANNERPATH_MQTT_FINAL - Path following with EKF and Pure Pursuit
+%
+% OBJECTIVES FULFILLED:
+% 1. Path Planning (Phase 2): Follows A* generated waypoints.
+% 2. Feedback Control (Phase 3): Uses Pure Pursuit (Coulter 1992).
+% 3. Loop Recovery (Sidequest): Detects circular loops and recovers.
+% 4. Kalman Filter (Sidequest): Fuses Model (Odometry) + Measurement (MoCap).
+% 5. Analysis: Plots Raw vs Filtered data for report comparison.
+
 clearvars; close all;
 
 %% ===============================================
@@ -110,8 +119,10 @@ try
 
     % EKF Initialization
     fprintf('Initializing Extended Kalman Filter...\n');
+
+    % EFK Parameters Tuned
     Q = diag([0.005, 0.005, 0.001]); 
-    R = diag([0.0001, 0.0001, 0.0001]); 
+    R = diag([0.0001, 0.0001, 0.0001]);     % MoCap highly accurate
     last_u = [0; 0]; 
 
     % MQTT Connection
@@ -315,7 +326,6 @@ end
 function [pose, valid] = getRobotPose_MQTT(mqttClient, limoNum, CFG, prev_pose, dt)
     pose = [0, 0, 0]; valid = false;
     try
-        % --- FIXED: Read the message BEFORE checking its height! ---
         mqttMsg = peek(mqttClient); 
         
         if isempty(mqttMsg), return; end
@@ -351,7 +361,25 @@ end
 
 function [lookahead_x, lookahead_y, lookahead_idx, crosstrack_error] = ...
     findLookaheadPoint(robot_x, robot_y, path, lookahead_distance)
-    
+    % FINDLOOKAHEADPOINT - Find point on path at lookahead distance ahead
+    %
+    % This function implements the Pure Pursuit algorithm's lookahead mechanism.
+    % It finds the closest point on the path to the robot, then finds a point
+    % that is 'lookahead_distance' ahead along the path from that closest point.
+    %
+    % INPUTS:
+    %   robot_x, robot_y   - Current robot position [m]
+    %   path               - Structure with fields:
+    %                          .x - X coordinates of path points [m]
+    %                          .y - Y coordinates of path points [m]
+    %                          .s - Arc length along path at each point [m]
+    %   lookahead_distance - How far ahead to look on path [m]
+    %
+    % OUTPUTS:
+    %   lookahead_x, lookahead_y - Coordinates of lookahead point [m]
+    %   lookahead_idx            - Index of lookahead point in path arrays
+    %   crosstrack_error         - Perpendicular distance from robot to path [m]
+
     distances = sqrt((path.x - robot_x).^2 + (path.y - robot_y).^2);
     [crosstrack_error, closest_idx] = min(distances);
     
@@ -362,4 +390,3 @@ function [lookahead_x, lookahead_y, lookahead_idx, crosstrack_error] = ...
     lookahead_x = path.x(lookahead_idx);
     lookahead_y = path.y(lookahead_idx);
 end
-
